@@ -1,0 +1,306 @@
+---
+title: "NYC Tree Canopy and Forestry Service Requests Analysis"
+output: html_document
+---
+By Jessica Saab  
+For NYU Spatial Analysis and Visualization, Fall 2021  
+
+### Loading libraries
+```{r, collapse=TRUE}
+library(tidyverse)
+library(fs)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(janitor)
+library(skimr)
+library(ggthemes)
+
+# bringing in a raw file and creating a clean version
+calls_raw <- read_csv("Forestry_Service_Requests.csv", 
+                      col_types = cols(CommunityBoard = col_character(), 
+                                       Postcode = col_character(), 
+                                       InitiatedDate = col_datetime(format = "%m/%d/%Y %H:%M:%S"),
+                                       ClosedDate = col_datetime(format = "%m/%d/%Y %H:%M:%S"),
+                                       )
+                      ) %>%  clean_names
+
+canopy <- read_csv("ny4p_tree_canopy_coverage.csv") %>% clean_names %>% rename("cb_name" = cb)
+```
+
+### Creating a main dataset
+
+My first dataset catalogs Forestry Service Requests to the NYC Parks Department.  
+Source: https://data.cityofnewyork.us/Environment/Forestry-Service-Requests/mu46-p9is
+
+I first took a look at the data to select some columns for analysis.  
+With over 650,000 obervations and 47 columns, there was a lot of data to look at.  
+I selected seven columns, renamed them, filtered out irregular values, and created some new columns with values.  
+Then I selected a subset and arranged them by date.
+
+My second dataset catalogs tree canopy cover in NYC.  
+Source: http://www.ny4p.org/data-and-research/research-library/open-space-profiles  
+It was aggregated by New Yorkers for Parks, a nonprofit organization that advocates for and researches open space in NYC. The dateset is not available to the public but I selected a specific measurement from their 2021 Open Space Profiles, which are available as PDFs, and created a simple CSV with the information on tree canopy cover.  
+```{r}
+calls <- select(calls_raw, # selecting columns from the full dataset
+  sr_status, # whether the case is open or closed
+  sr_category, # type of forestry request or concern 
+  sr_priority, # priority level given by agency
+  borough_code, # borough name
+  community_board, # community board
+  initiated_date, # start date
+  closed_date # end date
+  ) %>%
+  rename( # renaming columns
+    "status" = sr_status, 
+    "category" = sr_category, 
+    "priority" = sr_priority, 
+    "cb" = community_board, 
+    "start_date" = initiated_date, 
+    "end_date" = closed_date
+    ) %>% 
+  filter(str_length(cb) == 3) %>% # filtering out community board codes that are not three digits
+  filter(!is.na(cb)) %>% # filtering out community boards that are NULL
+  filter(!is.na(start_date)) %>% # filtering out start dates that are NULL
+  filter(!is.na(end_date)) %>% # filtering out end dates that are NULL which are open cases
+  filter(category != "Remove Debris") %>% #only two years of data
+  filter(category != "Remove Stump") %>% #only two years of data
+  mutate( # making new columns
+    boro = str_sub(cb, 1, 1), # taking the first digit to find the boro
+    district = str_sub(cb, 2, 3), # taking the last two digits to find the community board
+    start = (str_sub(start_date, 1, 7)),
+    end = (str_sub(end_date, 1, 7)),
+    boro_initials = recode(
+      boro, "1" = "MN", "2" = "BX", "3" = "BK", "4" = "QN", "5" = "SI"),
+    boro_name = recode(
+      boro, "1" = "Manhattan", "2" = "Bronx", "3" = "Brooklyn", "4" = "Queens", "5" = "Staten Island"),
+    cb_name = str_c(boro_initials, district)
+  ) %>% 
+  select(boro_name, cb_name, start, end, status, priority, category) %>% 
+  arrange(start)
+calls <- left_join(calls, canopy, "cb_name" = "cb_name") # joining my two datasets together
+calls
+```
+
+### Analysis: Tree canopy coverage in NYC
+Finding the average of tree canopy coverage by borough
+```{r}
+canopy_nyc <- calls %>% 
+  group_by(boro_name) %>% 
+  summarise(canopy_cover = mean(canopy_cover, na.rm = TRUE))
+canopy_nyc
+```
+
+### Plot: Ranking of tree canopy coverage in NYC boroughs
+```{r}
+canopy_nyc_plot <- ggplot(canopy_nyc, aes(reorder(boro_name, canopy_cover), canopy_cover, fill = boro_name)) +
+  geom_col(size = 1, alpha = 0.9) +
+  coord_flip() +
+  scale_y_continuous() +
+  theme_fivethirtyeight() +
+  theme(axis.title = element_text(), axis.title.y = element_blank()) +
+  theme(legend.position = "NONE") +
+  labs(
+    title = "Tree Canopy Coverage by NYC Borough",
+    y = "Total proportion of tree canopy coverage",
+    caption = "Source: New Yorkers for Parks"
+  ) +
+  scale_fill_brewer(palette = "Set2")
+canopy_nyc_plot
+```
+
+### Analysis: Finding out total service calls by borough
+Finding total number of calls by borough, excluding open cases, by grouping by year and borough, and sorting by number of calls.
+```{r}
+calls_boro <- calls %>% 
+  mutate(year = str_sub(start, 1, 4)) %>% 
+  group_by(year, boro_name) %>% 
+  summarise(total_calls = n()) %>% 
+  arrange(desc(total_calls)) %>% 
+  ungroup()
+calls_boro
+```
+
+### Analysis: Finding out total types of service calls by borough
+Finding total number of types of calls by borough, excluding open cases, by grouping by year and borough and category, and sorting by number of calls.
+```{r}
+call_types_boro <- calls %>% 
+  mutate(year = str_sub(start, 1, 4)) %>% 
+  group_by(year, boro_name, category) %>% 
+  summarise(total_calls = n()) %>% 
+  arrange(desc(total_calls)) %>% 
+  ungroup()
+call_types_boro
+```
+
+### Plot: Calls by Borough in all NYC
+Creating a bar graph of total calls by borough.
+```{r}
+calls_boro_plot <- ggplot(calls_boro, aes(year, total_calls, group = boro_name, fill = boro_name)) +
+  geom_col(size= 1, alpha = 0.9) +
+  scale_y_continuous() +
+  theme_fivethirtyeight() +
+  theme(axis.title = element_text(), legend.title = element_blank(), axis.title.x = element_blank()) +
+  labs(
+    title = "Forestry Service Calls by NYC Borough",
+    subtitle = "From February 2015 to September 2021",
+    y = "Total calls",
+    color = "Boroughs",
+    caption = "Source: NYC Parks"
+    ) +
+  scale_fill_brewer(palette = "Set2")
+calls_boro_plot
+```
+
+### Plot: Types of Calls in all NYC
+Creating a bar graph of total types of calls by borough.
+```{r}
+call_types_nyc_plot <- ggplot(call_types_boro, aes(year, total_calls, group = category, fill = category)) +
+  geom_col(size= 1, alpha = 0.9) +
+  theme_fivethirtyeight() +
+  theme(axis.title = element_text(), legend.title = element_blank()) +
+  labs(
+    title = "Types of Forestry Service Calls in all NYC",
+    subtitle = "From February 2015 to September 2021",
+    x = "Year",
+    y = "Total calls",
+    color = "Boroughs",
+    caption = "Source: NYC Parks"
+    ) +
+  scale_fill_brewer(palette = "Set2")
+call_types_nyc_plot
+```
+
+### Plot: Types of Calls by Borough
+Creating a bar graph of total types of calls for each borough.
+```{r}
+call_types_boro_plot <- ggplot(call_types_boro, aes(year, total_calls, group = category, fill = category)) +
+  geom_col(size = 1, alpha = 0.9) +
+  scale_y_continuous() +
+  theme_fivethirtyeight() +
+  theme(axis.title = element_text(), legend.title = element_blank(), axis.title.x = element_blank()) +
+  labs(
+    title = "Types of Calls by Borough",
+    subtitle = "From February 2015 to September 2021",
+    x = "Year",
+    y = "Total calls",
+    color = "Boroughs",
+    caption = "Source: NYC Parks"
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  facet_wrap(~boro_name)
+call_types_boro_plot
+```
+
+### Analysis: Calls by Community Board
+Finding total number of calls and average of canopy cover by community board, excluding open cases, by filtering out non-community board values and grouping by district and borough.
+```{r}
+calls_cb <- calls %>% 
+  filter(cb_name != "MN64") %>%  
+  filter(cb_name != "BX26") %>%  
+  filter(cb_name != "BX27") %>%  
+  filter(cb_name != "BX28") %>%  
+  filter(cb_name != "BK55") %>%  
+  filter(cb_name != "BK56") %>% 
+  filter(cb_name != "QN80") %>% 
+  filter(cb_name != "QN81") %>% 
+  filter(cb_name != "QN82") %>% 
+  filter(cb_name != "QN83") %>% 
+  filter(cb_name != "QN84") %>% 
+  filter(cb_name != "SI95") %>% 
+  group_by(cb_name, boro_name) %>% 
+  summarise(
+    total_calls = n(),
+    canopy_cover = mean(canopy_cover, na.rm = TRUE),
+    ) %>% 
+  arrange(desc(total_calls)) %>% 
+  ungroup()
+calls_cb
+```
+
+### Analysis: Types of calls by Community Board
+Finding total number of types of calls by community board, excluding open cases, by grouping by year, community board, borough, and category, and sorting by number of calls.
+```{r}
+call_types_cb <- calls %>% 
+  mutate(year = str_sub(start, 1, 4)) %>% 
+  group_by(year, cb_name, boro_name, category) %>% 
+  summarise(total_calls = n()) %>% 
+  arrange(desc(total_calls)) %>% 
+  ungroup()
+call_types_cb
+```
+
+### Plot: Ranking of Service Calls by Community Boards
+Creating a bar graph of total calls by community boards.
+```{r}
+calls_cb_plot <- 
+  ggplot(calls_cb, aes(reorder(cb_name, total_calls), total_calls, fill = boro_name)) +
+  geom_col(size= 3, alpha = 0.9) +
+  coord_flip() +
+  scale_y_continuous() +
+  theme_fivethirtyeight() +
+  theme(
+    axis.title = element_text(), 
+    legend.title = element_blank(), 
+    axis.title.y = element_blank()
+    ) +
+  labs(
+    title = "Forestry Service Calls by NYC Community Board",
+    subtitle = "From February 2015 to September 2021",
+    x = "Community Boards",
+    y = "Total calls",
+    caption = "Source: NYC Parks"
+  ) +
+  scale_fill_brewer(palette = "Set2")
+calls_cb_plot
+```
+
+### Plot: Ranking of Tree Canopy Cover by Community Board
+Creating a bar graph of total tree canopy coverage by community boards.
+```{r}
+canopy_cb_plot <- 
+  ggplot(calls_cb, aes(reorder(cb_name, canopy_cover), canopy_cover, fill = boro_name)) +
+  geom_col(size= 3, alpha = 0.9) +
+  coord_flip() +
+  scale_y_continuous() +
+  theme_fivethirtyeight() +
+  theme(
+    axis.title = element_text(), 
+    legend.title = element_blank(), 
+    axis.title.y = element_blank()
+    ) +
+  labs(
+    title = "Tree Canopy Cover by NYC Community Board",
+    subtitle = "From February 2015 to September 2021",
+    x = "Community Boards",
+    y = "Total proportion of tree canopy coverage",
+    caption = "Source: New Yorkers for Parks"
+  ) +
+  scale_fill_brewer(palette = "Set2")
+canopy_cb_plot
+```
+
+### Plot: Tree Canopy Coverage vs. Forestry Service Calls
+Creating a scatterplot of tree canopy coverage and total calls by community board. 
+```{r}
+calls_vs_canopy <-
+  ggplot(calls_cb, aes(total_calls, canopy_cover, color = boro_name, label = cb_name)) +
+  geom_point(size= 3, alpha = 0.7, stroke = 0) +
+  geom_text(aes(label=ifelse(total_calls>22000,as.character(cb_name),'')),hjust=-0.1,vjust=-0.1) +
+  geom_text(aes(label=ifelse(canopy_cover>0.31,as.character(cb_name),'')),hjust=-0.1,vjust=-0.1) +
+  theme_fivethirtyeight() +
+  theme(
+    axis.title = element_text(), 
+    legend.title = element_blank()
+    ) +
+  labs(
+    title = "Tree Canopy Coverage vs. Forestry Service Calls",
+    subtitle = "By NYC Community Board",
+    x = "Total calls since 2015",
+    y = "Proportion of canopy cover",
+    caption = "Source: NYC Parks and New Yorkers for Parks"
+  ) +
+  scale_color_brewer(palette = "Set2")
+calls_vs_canopy
+```
+
